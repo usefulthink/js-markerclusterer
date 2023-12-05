@@ -13,13 +13,13 @@
 # limitations under the License.
 
 name: Test
-on: [push, pull_request]
+on: [push, pull_request, workflow_call]
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:      
-      - uses: actions/checkout@v3
-      - uses: actions/cache@v3
+      - uses: actions/checkout@v2
+      - uses: actions/cache@v2
         with:
           path: ~/.npm
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
