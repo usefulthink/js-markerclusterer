@@ -1,4 +1,4 @@
-import { _ as __rest, S as Supercluster, e as equal, i as interpolateRgb, L as Loader } from './vendor.js';
+import { _ as __rest, S as Supercluster, d as deepEqual, i as interpolateRgb, a as __awaiter, s as setOptions, b as importLibrary } from './vendor.js';
 
 /**
  * Copyright 2023 Google LLC
@@ -44,10 +44,12 @@ class MarkerUtils {
                     return marker.position;
                 }
                 // since we can't cast to LatLngLiteral for reasons =(
-                if (marker.position.lat && marker.position.lng) {
+                if (Number.isFinite(marker.position.lat) &&
+                    Number.isFinite(marker.position.lng)) {
                     return new google.maps.LatLng(marker.position.lat, marker.position.lng);
                 }
             }
+            // @ts-expect-error - LatLng constructor expects numbers
             return new google.maps.LatLng(null);
         }
         return marker.getPosition();
@@ -84,7 +86,9 @@ class MarkerUtils {
  */
 class Cluster {
     constructor({ markers, position }) {
-        this.markers = markers;
+        this.markers = [];
+        if (markers)
+            this.markers = markers;
         if (position) {
             if (position instanceof google.maps.LatLng) {
                 this._position = position;
@@ -105,6 +109,7 @@ class Cluster {
         return bounds;
     }
     get position() {
+        // @ts-expect-error - position may be undefined
         return this._position || this.bounds.getCenter();
     }
     /**
@@ -128,6 +133,34 @@ class Cluster {
             this.marker = undefined;
         }
         this.markers.length = 0;
+    }
+}
+
+/**
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/**
+ * A typescript assertion function used in cases where typescript has to be
+ * convinced that the object in question can not be null.
+ *
+ * @param value
+ * @param message
+ */
+function assertNotNull(value, message = "assertion failed") {
+    if (value === null || value === undefined) {
+        throw Error(message);
     }
 }
 
@@ -204,13 +237,18 @@ class SuperClusterAlgorithm extends AbstractAlgorithm {
     constructor(_a) {
         var { maxZoom, radius = 60 } = _a, options = __rest(_a, ["maxZoom", "radius"]);
         super({ maxZoom });
+        this.markers = [];
+        this.clusters = [];
         this.state = { zoom: -1 };
         this.superCluster = new Supercluster(Object.assign({ maxZoom: this.maxZoom, radius }, options));
     }
     calculate(input) {
         let changed = false;
-        const state = { zoom: input.map.getZoom() };
-        if (!equal(input.markers, this.markers)) {
+        let zoom = input.map.getZoom();
+        assertNotNull(zoom);
+        zoom = Math.round(zoom);
+        const state = { zoom: zoom };
+        if (!deepEqual(input.markers, this.markers)) {
             changed = true;
             // TODO use proxy to avoid copy?
             this.markers = [...input.markers];
@@ -219,10 +257,7 @@ class SuperClusterAlgorithm extends AbstractAlgorithm {
                 const coordinates = [position.lng(), position.lat()];
                 return {
                     type: "Feature",
-                    geometry: {
-                        type: "Point",
-                        coordinates,
-                    },
+                    geometry: { type: "Point", coordinates },
                     properties: { marker },
                 };
             });
@@ -230,18 +265,25 @@ class SuperClusterAlgorithm extends AbstractAlgorithm {
         }
         if (!changed) {
             if (this.state.zoom <= this.maxZoom || state.zoom <= this.maxZoom) {
-                changed = !equal(this.state, state);
+                changed = !deepEqual(this.state, state);
             }
         }
         this.state = state;
+        // when input is empty, return right away
+        if (input.markers.length === 0) {
+            this.clusters = [];
+            return { clusters: this.clusters, changed };
+        }
         if (changed) {
             this.clusters = this.cluster(input);
         }
         return { clusters: this.clusters, changed };
     }
     cluster({ map }) {
+        const zoom = map.getZoom();
+        assertNotNull(zoom);
         return this.superCluster
-            .getClusters([-180, -90, 180, 90], Math.round(map.getZoom()))
+            .getClusters([-180, -90, 180, 90], Math.round(zoom))
             .map((feature) => this.transformCluster(feature));
     }
     transformCluster({ geometry: { coordinates: [lng, lat], }, properties, }) {
@@ -407,6 +449,7 @@ function extend(type1, type2) {
 /**
  * @ignore
  */
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 class OverlayViewSafe {
     constructor() {
         // MarkerClusterer implements google.maps.OverlayView interface. We use the
@@ -438,9 +481,11 @@ var MarkerClustererEvents;
     MarkerClustererEvents["CLUSTERING_BEGIN"] = "clusteringbegin";
     MarkerClustererEvents["CLUSTERING_END"] = "clusteringend";
     MarkerClustererEvents["CLUSTER_CLICK"] = "click";
+    MarkerClustererEvents["GMP_CLICK"] = "gmp-click";
 })(MarkerClustererEvents || (MarkerClustererEvents = {}));
 const defaultOnClusterClickHandler = (_, cluster, map) => {
-    map.fitBounds(cluster.bounds);
+    if (cluster.bounds)
+        map.fitBounds(cluster.bounds);
 };
 /**
  * MarkerClusterer creates and manages per-zoom-level clusters for large amounts
@@ -450,6 +495,9 @@ const defaultOnClusterClickHandler = (_, cluster, map) => {
 class MarkerClusterer extends OverlayViewSafe {
     constructor({ map, markers = [], algorithmOptions = {}, algorithm = new SuperClusterAlgorithm(algorithmOptions), renderer = new DefaultRenderer(), onClusterClick = defaultOnClusterClickHandler, }) {
         super();
+        /** @see {@link MarkerClustererOptions.map} */
+        this.map = null;
+        this.idleListener = null;
         this.markers = [...markers];
         this.clusters = [];
         this.algorithm = algorithm;
@@ -518,23 +566,23 @@ class MarkerClusterer extends OverlayViewSafe {
                 mapCanvasProjection: this.getProjection(),
             });
             // Allow algorithms to return flag on whether the clusters/markers have changed.
-            if (changed || changed == undefined) {
+            if (changed || changed === undefined) {
                 // Accumulate the markers of the clusters composed of a single marker.
                 // Those clusters directly use the marker.
                 // Clusters with more than one markers use a group marker generated by a renderer.
                 const singleMarker = new Set();
                 for (const cluster of clusters) {
-                    if (cluster.markers.length == 1) {
+                    if (cluster.markers.length === 1) {
                         singleMarker.add(cluster.markers[0]);
                     }
                 }
                 const groupMarkers = [];
                 // Iterate the clusters that are currently rendered.
                 for (const cluster of this.clusters) {
-                    if (cluster.marker == null) {
+                    if (!cluster.marker) {
                         continue;
                     }
-                    if (cluster.markers.length == 1) {
+                    if (cluster.markers.length === 1) {
                         if (!singleMarker.has(cluster.marker)) {
                             // The marker:
                             // - was previously rendered because it is from a cluster with 1 marker,
@@ -556,11 +604,14 @@ class MarkerClusterer extends OverlayViewSafe {
         }
     }
     onAdd() {
-        this.idleListener = this.getMap().addListener("idle", this.render.bind(this));
+        const map = this.getMap();
+        assertNotNull(map);
+        this.idleListener = map.addListener("idle", this.render.bind(this));
         this.render();
     }
     onRemove() {
-        google.maps.event.removeListener(this.idleListener);
+        if (this.idleListener)
+            google.maps.event.removeListener(this.idleListener);
         this.reset();
     }
     reset() {
@@ -582,7 +633,11 @@ class MarkerClusterer extends OverlayViewSafe {
                 // Make sure all individual markers are removed from the map.
                 cluster.markers.forEach((marker) => MarkerUtils.setMap(marker, null));
                 if (this.onClusterClick) {
-                    cluster.marker.addListener("click", 
+                    // legacy Marker uses 'click' events, whereas AdvancedMarkerElement uses 'gmp-click'
+                    const markerClickEventName = MarkerUtils.isAdvancedMarker(cluster.marker)
+                        ? MarkerClustererEvents.GMP_CLICK
+                        : MarkerClustererEvents.CLUSTER_CLICK;
+                    cluster.marker.addListener(markerClickEventName, 
                     /* istanbul ignore next */
                     (event) => {
                         google.maps.event.trigger(this, MarkerClustererEvents.CLUSTER_CLICK, cluster);
@@ -615,8 +670,8 @@ const DEFAULT_KEY = "AIzaSyDhRjl83cPVWeaEer-SnKIw7GTjBuqWxXI";
 const getLoaderOptions = () => {
     var _a;
     return ({
-        apiKey: (_a = localStorage.getItem("gmaps-key")) !== null && _a !== void 0 ? _a : DEFAULT_KEY,
-        version: "weekly",
+        key: (_a = localStorage.getItem("gmaps-key")) !== null && _a !== void 0 ? _a : DEFAULT_KEY,
+        v: "weekly",
         libraries: ["marker"],
     });
 };
@@ -12711,48 +12766,53 @@ const interpolatedRenderer = {
         });
     },
 };
-new Loader(getLoaderOptions()).load().then(() => {
-    const maps = [];
-    const panels = [
-        [
-            document.getElementById("default"),
-            new DefaultRenderer(),
-            `new DefaultRenderer()`,
-        ],
-        [
-            document.getElementById("simple"),
-            {
-                render: ({ count, position }) => new google.maps.Marker({
-                    label: { text: String(count), color: "white", fontSize: "10px" },
-                    position,
-                    // adjust zIndex to be above other markers
-                    zIndex: Number(google.maps.Marker.MAX_ZINDEX) + count,
-                }),
-            },
-            null,
-        ],
-        [document.getElementById("svg"), new DefaultRenderer(), null],
-        [document.getElementById("interpolated"), interpolatedRenderer, null],
-    ];
-    panels.forEach(([element, renderer, text]) => {
-        if (!text) {
-            text = renderer.render.toString();
-        }
-        const map = new google.maps.Map(element, mapOptions);
-        maps.push(map);
-        const textElement = document.createElement("pre");
-        // @ts-ignore
-        textElement.innerHTML = window.hljs.highlight(text, {
-            language: "typescript",
-        }).value;
-        textElement.classList.add("description");
-        map.controls[google.maps.ControlPosition.LEFT_TOP].push(textElement);
-        const markers = trees.map(({ geometry }) => createMarker(map, geometry.coordinates[1], geometry.coordinates[0]));
-        new MarkerClusterer({
-            renderer,
-            map,
-            markers,
+function main() {
+    return __awaiter(this, void 0, void 0, function* () {
+        setOptions(getLoaderOptions());
+        const { Map } = yield importLibrary("maps");
+        const maps = [];
+        const panels = [
+            [
+                document.getElementById("default"),
+                new DefaultRenderer(),
+                "new DefaultRenderer()",
+            ],
+            [
+                document.getElementById("simple"),
+                {
+                    render: ({ count, position }) => new google.maps.Marker({
+                        label: { text: String(count), color: "white", fontSize: "10px" },
+                        position,
+                        // adjust zIndex to be above other markers
+                        zIndex: Number(google.maps.Marker.MAX_ZINDEX) + count,
+                    }),
+                },
+                null,
+            ],
+            [document.getElementById("svg"), new DefaultRenderer(), null],
+            [document.getElementById("interpolated"), interpolatedRenderer, null],
+        ];
+        panels.forEach(([element, renderer, text]) => {
+            if (!text) {
+                text = renderer.render.toString();
+            }
+            const map = new Map(element, mapOptions);
+            maps.push(map);
+            const textElement = document.createElement("pre");
+            // @ts-expect-error - hljs is not on window
+            textElement.innerHTML = window.hljs.highlight(text, {
+                language: "typescript",
+            }).value;
+            textElement.classList.add("description");
+            map.controls[google.maps.ControlPosition.LEFT_TOP].push(textElement);
+            const markers = trees.map(({ geometry }) => createMarker(map, geometry.coordinates[1], geometry.coordinates[0]));
+            new MarkerClusterer({
+                renderer,
+                map,
+                markers,
+            });
         });
+        sync(...maps);
     });
-    sync(...maps);
-});
+}
+main().catch((err) => console.error(err));
